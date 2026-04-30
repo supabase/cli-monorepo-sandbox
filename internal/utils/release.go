@@ -32,7 +32,7 @@ func GetGitHubClient(ctx context.Context) *github.Client {
 
 const (
 	CLI_OWNER = "supabase"
-	CLI_REPO  = "cli-monorepo-sandbox"
+	CLI_REPO  = "cli"
 )
 
 func GetLatestRelease(ctx context.Context) (string, error) {
