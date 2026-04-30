@@ -1,0 +1,45 @@
+{
+  "name": "supabase-monorepo-sandbox",
+  "version": "0.0.0-automated",
+  "description": "Throwaway sandbox of the Supabase CLI for rehearsing the monorepo consolidation. Do not depend on this.",
+  "repository": "supabase/cli-monorepo-sandbox",
+  "homepage": "https://github.com/supabase/cli-monorepo-sandbox",
+  "bugs": "https://github.com/supabase/cli-monorepo-sandbox/issues",
+  "license": "MIT",
+  "author": "Supabase",
+  "type": "module",
+  "engines": {
+    "npm": ">=8"
+  },
+  "files": [
+    "scripts"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "bin": {
+    "supabase": "bin/supabase"
+  },
+  "dependencies": {
+    "bin-links": "^6.0.0",
+    "https-proxy-agent": "^7.0.2",
+    "node-fetch": "^3.3.2",
+    "tar": "7.5.11"
+  },
+  "release": {
+    "branches": [
+      {
+        "name": "+([0-9])?(.{+([0-9]),x}).x",
+        "channel": "hotfix"
+      },
+      {
+        "name": "develop",
+        "channel": "latest"
+      }
+    ],
+    "plugins": [
+      "@semantic-release/commit-analyzer",
+      "@semantic-release/git"
+    ]
+  }
+}
