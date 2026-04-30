@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/supabase/cli/pkg/config"
 )
 
 type MockFs struct {
@@ -156,6 +157,18 @@ func TestAssertProjectRefIsValid(t *testing.T) {
 	})
 }
 
+func TestGetHostname(t *testing.T) {
+	t.Run("returns SUPABASE_SERVICES_HOSTNAME when set", func(t *testing.T) {
+		t.Setenv("SUPABASE_SERVICES_HOSTNAME", "host.docker.internal")
+		assert.Equal(t, "host.docker.internal", GetHostname())
+	})
+
+	t.Run("returns 127.0.0.1 when SUPABASE_SERVICES_HOSTNAME is not set", func(t *testing.T) {
+		t.Setenv("SUPABASE_SERVICES_HOSTNAME", "")
+		assert.Equal(t, "127.0.0.1", GetHostname())
+	})
+}
+
 func TestWriteFile(t *testing.T) {
 	t.Run("writes file with directories", func(t *testing.T) {
 		fsys := afero.NewMemMapFs()
@@ -184,5 +197,21 @@ func TestWriteFile(t *testing.T) {
 		written, err := afero.ReadFile(fsys, path)
 		assert.NoError(t, err)
 		assert.Equal(t, updated, written)
+	})
+}
+
+func TestGetDeclarativeDir(t *testing.T) {
+	t.Run("uses configured pgdelta path", func(t *testing.T) {
+		Config.Experimental.PgDelta = &config.PgDeltaConfig{
+			DeclarativeSchemaPath: filepath.Join(SupabaseDirPath, "db", "decl"),
+		}
+
+		assert.Equal(t, filepath.Join(SupabaseDirPath, "db", "decl"), GetDeclarativeDir())
+	})
+
+	t.Run("falls back to default declarative dir", func(t *testing.T) {
+		Config.Experimental.PgDelta = nil
+
+		assert.Equal(t, DeclarativeDir, GetDeclarativeDir())
 	})
 }

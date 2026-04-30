@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgconn"
 	"github.com/jackc/pgx/v4"
 	"github.com/spf13/afero"
+	"github.com/supabase/cli/internal/db/pgcache"
 	"github.com/supabase/cli/internal/migration/apply"
 	"github.com/supabase/cli/internal/status"
 	"github.com/supabase/cli/internal/utils"
@@ -319,7 +320,7 @@ func initAuthJob(host string) utils.DockerJob {
 	return utils.DockerJob{
 		Image: utils.Config.Auth.Image,
 		Env: []string{
-			"API_EXTERNAL_URL=" + utils.Config.Api.ExternalUrl,
+			"API_EXTERNAL_URL=" + utils.Config.AuthExternalURL(),
 			"GOTRUE_LOG_LEVEL=error",
 			"GOTRUE_DB_DRIVER=postgres",
 			fmt.Sprintf("GOTRUE_DB_DATABASE_URL=postgresql://supabase_auth_admin:%s@%s:5432/postgres", utils.Config.Db.Password, host),
@@ -364,7 +365,19 @@ func SetupLocalDatabase(ctx context.Context, version string, fsys afero.Fs, w io
 	if err := SetupDatabase(ctx, conn, utils.DbId, w, fsys); err != nil {
 		return err
 	}
-	return apply.MigrateAndSeed(ctx, version, conn, fsys)
+	if err := apply.MigrateAndSeed(ctx, version, conn, fsys); err != nil {
+		return err
+	}
+	if err := pgcache.TryCacheMigrationsCatalog(ctx, pgconn.Config{
+		Host:     utils.Config.Hostname,
+		Port:     utils.Config.Db.Port,
+		User:     "postgres",
+		Password: utils.Config.Db.Password,
+		Database: "postgres",
+	}, "local", version, fsys, options...); err != nil {
+		fmt.Fprintln(os.Stderr, "Warning: failed to cache migrations catalog:", err)
+	}
+	return nil
 }
 
 func SetupDatabase(ctx context.Context, conn *pgx.Conn, host string, w io.Writer, fsys afero.Fs) error {
