@@ -39,14 +39,43 @@ func TestConfigParsing(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
+	t.Run("auth external url defaults from api external url", func(t *testing.T) {
+		config := NewConfig()
+		require.NoError(t, config.Load("", fs.MapFS{}))
+
+		assert.Equal(t, strings.TrimRight(config.Api.ExternalUrl, "/")+"/auth/v1", config.Auth.ExternalUrl)
+		assert.Equal(t, config.Auth.ExternalUrl, config.Auth.JwtIssuer)
+	})
+
+	t.Run("auth external url and jwt issuer preserve explicit overrides", func(t *testing.T) {
+		config := NewConfig()
+		fsys := fs.MapFS{
+			"config.toml": &fs.MapFile{Data: []byte(`
+[api]
+external_url = "https://api.example.com/"
+
+[auth]
+site_url = "https://app.example.com"
+external_url = "https://auth.example.com/custom/"
+jwt_issuer = "https://issuer.example.com/custom/"
+`)},
+		}
+
+		require.NoError(t, config.Load("config.toml", fsys))
+		assert.Equal(t, "https://auth.example.com/custom/", config.Auth.ExternalUrl)
+		assert.Equal(t, "https://issuer.example.com/custom/", config.Auth.JwtIssuer)
+	})
+
 	t.Run("config file with environment variables", func(t *testing.T) {
 		config := NewConfig()
 		// Setup in-memory fs
 		fsys := fs.MapFS{
-			"supabase/config.toml":           &fs.MapFile{Data: testInitConfigEmbed},
-			"supabase/templates/invite.html": &fs.MapFile{},
-			"certs/my-cert.pem":              &fs.MapFile{},
-			"certs/my-key.pem":               &fs.MapFile{},
+			"supabase/config.toml":                                  &fs.MapFile{Data: testInitConfigEmbed},
+			"supabase/templates/invite.html":                        &fs.MapFile{},
+			"supabase/templates/password_changed_notification.html": &fs.MapFile{},
+			"supabase/signing_keys.json":                            &fs.MapFile{Data: []byte("[]")},
+			"certs/my-cert.pem":                                     &fs.MapFile{},
+			"certs/my-key.pem":                                      &fs.MapFile{},
 		}
 		// Run test
 		t.Setenv("TWILIO_AUTH_TOKEN", "token")
@@ -73,6 +102,144 @@ func TestConfigParsing(t *testing.T) {
 		}
 		// Run test
 		assert.Error(t, config.Load("", fsys))
+	})
+	t.Run("config file with passkey and webauthn settings", func(t *testing.T) {
+		config := NewConfig()
+		fsys := fs.MapFS{
+			"supabase/config.toml": &fs.MapFile{Data: []byte(`
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+[auth.passkey]
+enabled = true
+[auth.webauthn]
+rp_display_name = "Supabase CLI"
+rp_id = "localhost"
+rp_origins = ["http://127.0.0.1:3000", "https://localhost:3000"]
+`)},
+		}
+		// Run test
+		assert.NoError(t, config.Load("", fsys))
+		// Check result
+		if assert.NotNil(t, config.Auth.Passkey) {
+			assert.True(t, config.Auth.Passkey.Enabled)
+		}
+		if assert.NotNil(t, config.Auth.Webauthn) {
+			assert.Equal(t, "Supabase CLI", config.Auth.Webauthn.RpDisplayName)
+			assert.Equal(t, "localhost", config.Auth.Webauthn.RpId)
+			assert.Equal(t, []string{
+				"http://127.0.0.1:3000",
+				"https://localhost:3000",
+			}, config.Auth.Webauthn.RpOrigins)
+		}
+	})
+
+	t.Run("webauthn section without passkey loads successfully", func(t *testing.T) {
+		config := NewConfig()
+		fsys := fs.MapFS{
+			"supabase/config.toml": &fs.MapFile{Data: []byte(`
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+[auth.webauthn]
+rp_display_name = "Supabase CLI"
+rp_id = "localhost"
+rp_origins = ["http://127.0.0.1:3000"]
+`)},
+		}
+		// Run test
+		assert.NoError(t, config.Load("", fsys))
+		// Check result
+		assert.Nil(t, config.Auth.Passkey)
+		if assert.NotNil(t, config.Auth.Webauthn) {
+			assert.Equal(t, "localhost", config.Auth.Webauthn.RpId)
+		}
+	})
+
+	t.Run("passkey enabled requires webauthn section", func(t *testing.T) {
+		config := NewConfig()
+		fsys := fs.MapFS{
+			"supabase/config.toml": &fs.MapFile{Data: []byte(`
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+[auth.passkey]
+enabled = true
+`)},
+		}
+		// Run test
+		err := config.Load("", fsys)
+		// Check result
+		assert.ErrorContains(t, err, "Missing required config section: auth.webauthn")
+	})
+
+	t.Run("passkey enabled requires rp_id", func(t *testing.T) {
+		config := NewConfig()
+		fsys := fs.MapFS{
+			"supabase/config.toml": &fs.MapFile{Data: []byte(`
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+[auth.passkey]
+enabled = true
+[auth.webauthn]
+rp_origins = ["http://127.0.0.1:3000"]
+`)},
+		}
+		// Run test
+		err := config.Load("", fsys)
+		// Check result
+		assert.ErrorContains(t, err, "Missing required field in config: auth.webauthn.rp_id")
+	})
+
+	t.Run("passkey enabled requires rp_origins", func(t *testing.T) {
+		config := NewConfig()
+		fsys := fs.MapFS{
+			"supabase/config.toml": &fs.MapFile{Data: []byte(`
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+[auth.passkey]
+enabled = true
+[auth.webauthn]
+rp_id = "localhost"
+`)},
+		}
+		// Run test
+		err := config.Load("", fsys)
+		// Check result
+		assert.ErrorContains(t, err, "Missing required field in config: auth.webauthn.rp_origins")
+	})
+
+	t.Run("parses experimental pgdelta config", func(t *testing.T) {
+		config := NewConfig()
+		fsys := fs.MapFS{
+			"supabase/config.toml": &fs.MapFile{Data: []byte(`
+[experimental.pgdelta]
+enabled = true
+declarative_schema_path = "./db/decl"
+format_options = "{\"keywordCase\":\"upper\",\"indent\":2}"
+`)},
+		}
+
+		require.NoError(t, config.Load("", fsys))
+		require.NotNil(t, config.Experimental.PgDelta)
+		assert.True(t, config.Experimental.PgDelta.Enabled)
+		assert.Equal(t, path.Join("supabase", "db", "decl"), config.Experimental.PgDelta.DeclarativeSchemaPath)
+		assert.Equal(t, `{"keywordCase":"upper","indent":2}`, config.Experimental.PgDelta.FormatOptions)
+	})
+
+	t.Run("rejects invalid experimental pgdelta format options", func(t *testing.T) {
+		config := NewConfig()
+		fsys := fs.MapFS{
+			"supabase/config.toml": &fs.MapFile{Data: []byte(`
+[experimental.pgdelta]
+format_options = "not-json"
+`)},
+		}
+
+		err := config.Load("", fsys)
+		assert.ErrorContains(t, err, "experimental.pgdelta.format_options")
 	})
 }
 

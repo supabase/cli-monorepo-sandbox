@@ -6,7 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
@@ -18,12 +20,38 @@ import (
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	phtelemetry "github.com/supabase/cli/internal/telemetry"
 	"github.com/supabase/cli/internal/testing/apitest"
 	"github.com/supabase/cli/internal/utils"
+	supabaseapi "github.com/supabase/cli/pkg/api"
 	"github.com/supabase/cli/pkg/config"
 	"github.com/supabase/cli/pkg/pgtest"
 	"github.com/supabase/cli/pkg/storage"
 )
+
+type fakeAnalytics struct {
+	enabled  bool
+	captures []captureCall
+}
+
+type captureCall struct {
+	distinctID string
+	event      string
+	properties map[string]any
+	groups     map[string]string
+}
+
+func (f *fakeAnalytics) Enabled() bool { return f.enabled }
+func (f *fakeAnalytics) Capture(distinctID string, event string, properties map[string]any, groups map[string]string) error {
+	f.captures = append(f.captures, captureCall{distinctID: distinctID, event: event, properties: properties, groups: groups})
+	return nil
+}
+func (f *fakeAnalytics) Identify(distinctID string, properties map[string]any) error { return nil }
+func (f *fakeAnalytics) Alias(distinctID string, alias string) error                 { return nil }
+func (f *fakeAnalytics) GroupIdentify(groupType string, groupKey string, properties map[string]any) error {
+	return nil
+}
+func (f *fakeAnalytics) Close() error { return nil }
 
 func TestStartCommand(t *testing.T) {
 	t.Run("throws error on malformed config", func(t *testing.T) {
@@ -95,6 +123,18 @@ func TestDatabaseStart(t *testing.T) {
 	t.Run("starts database locally", func(t *testing.T) {
 		// Setup in-memory fs
 		fsys := afero.NewMemMapFs()
+		t.Setenv("SUPABASE_HOME", "/tmp/supabase-home")
+		analytics := &fakeAnalytics{enabled: true}
+		service, err := phtelemetry.NewService(fsys, phtelemetry.Options{
+			Analytics: analytics,
+			Now:       func() time.Time { return time.Date(2026, time.April, 1, 12, 0, 0, 0, time.UTC) },
+		})
+		require.NoError(t, err)
+		require.NoError(t, phtelemetry.SaveLinkedProject(supabaseapi.V1ProjectWithDatabaseResponse{
+			Ref:            "proj_123",
+			OrganizationId: "org_123",
+		}, fsys))
+		ctx := phtelemetry.WithService(context.Background(), service)
 		// Setup mock docker
 		require.NoError(t, apitest.MockDocker(utils.Docker))
 		defer gock.OffAll()
@@ -202,10 +242,16 @@ func TestDatabaseStart(t *testing.T) {
 			Reply(http.StatusOK).
 			JSON([]storage.BucketResponse{})
 		// Run test
-		err := run(context.Background(), fsys, []string{}, pgconn.Config{Host: utils.DbId}, conn.Intercept)
+		err = run(ctx, fsys, []string{}, pgconn.Config{Host: utils.DbId}, conn.Intercept)
 		// Check error
 		assert.NoError(t, err)
 		assert.Empty(t, apitest.ListUnmatchedRequests())
+		require.Len(t, analytics.captures, 1)
+		assert.Equal(t, phtelemetry.EventStackStarted, analytics.captures[0].event)
+		assert.Equal(t, map[string]string{
+			phtelemetry.GroupOrganization: "org_123",
+			phtelemetry.GroupProject:      "proj_123",
+		}, analytics.captures[0].groups)
 	})
 
 	t.Run("skips excluded containers", func(t *testing.T) {
@@ -255,6 +301,59 @@ func TestDatabaseStart(t *testing.T) {
 	})
 }
 
+func TestBuildGotrueEnv(t *testing.T) {
+	original := utils.Config
+	t.Cleanup(func() {
+		utils.Config = original
+	})
+
+	t.Run("uses auth scoped external url and relative mailer paths", func(t *testing.T) {
+		utils.Config = config.NewConfig()
+		utils.Config.Api.ExternalUrl = "http://127.0.0.1:54321"
+		utils.Config.Auth.ExternalUrl = "http://127.0.0.1:54321/auth/v1"
+		utils.Config.Auth.JwtIssuer = utils.Config.Auth.ExternalUrl
+		utils.Config.Auth.SiteUrl = "http://127.0.0.1:3000"
+		provider := utils.Config.Auth.External["github"]
+		provider.Enabled = true
+		provider.ClientId = "client-id"
+		provider.Secret.Value = "secret"
+		utils.Config.Auth.External["github"] = provider
+
+		env := envToMap(appendGotrueExternalProviderEnv(buildGotrueEnv(pgconn.Config{
+			Host:     "db",
+			Port:     5432,
+			Database: "postgres",
+			Password: "postgres",
+		})))
+
+		assert.Equal(t, "http://127.0.0.1:54321/auth/v1", env["API_EXTERNAL_URL"])
+		assert.Equal(t, "http://127.0.0.1:54321/auth/v1", env["GOTRUE_JWT_ISSUER"])
+		assert.Equal(t, "/verify", env["GOTRUE_MAILER_URLPATHS_INVITE"])
+		assert.Equal(t, "/verify", env["GOTRUE_MAILER_URLPATHS_CONFIRMATION"])
+		assert.Equal(t, "/verify", env["GOTRUE_MAILER_URLPATHS_RECOVERY"])
+		assert.Equal(t, "/verify", env["GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE"])
+		assert.NotContains(t, env, "GOTRUE_EXTERNAL_GITHUB_REDIRECT_URI")
+	})
+
+	t.Run("preserves explicit provider redirect override", func(t *testing.T) {
+		utils.Config = config.NewConfig()
+		utils.Config.Api.ExternalUrl = "http://127.0.0.1:54321"
+		utils.Config.Auth.ExternalUrl = "http://127.0.0.1:54321/auth/v1"
+		utils.Config.Auth.JwtIssuer = "https://issuer.example.com/auth/v1"
+		utils.Config.Auth.SiteUrl = "http://127.0.0.1:3000"
+		provider := utils.Config.Auth.External["azure"]
+		provider.Enabled = true
+		provider.RedirectUri = "https://example.com/custom/callback"
+		utils.Config.Auth.External["azure"] = provider
+
+		env := envToMap(appendGotrueExternalProviderEnv(buildGotrueEnv(pgconn.Config{})))
+
+		assert.Equal(t, "http://127.0.0.1:54321/auth/v1", env["API_EXTERNAL_URL"])
+		assert.Equal(t, "https://issuer.example.com/auth/v1", env["GOTRUE_JWT_ISSUER"])
+		assert.Equal(t, "https://example.com/custom/callback", env["GOTRUE_EXTERNAL_AZURE_REDIRECT_URI"])
+	})
+}
+
 func TestFormatMapForEnvConfig(t *testing.T) {
 	t.Run("It produces the correct format and removes the trailing comma", func(t *testing.T) {
 		testcases := []struct {
@@ -301,4 +400,15 @@ func TestFormatMapForEnvConfig(t *testing.T) {
 			assert.Regexp(t, r, result)
 		}
 	})
+}
+
+func envToMap(env []string) map[string]string {
+	result := make(map[string]string, len(env))
+	for _, item := range env {
+		key, value, ok := strings.Cut(item, "=")
+		if ok {
+			result[key] = value
+		}
+	}
+	return result
 }

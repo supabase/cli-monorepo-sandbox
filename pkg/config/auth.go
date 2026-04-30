@@ -150,6 +150,7 @@ type (
 		Image   string `toml:"-" json:"-"`
 
 		SiteUrl                    string               `toml:"site_url" json:"site_url"`
+		ExternalUrl                string               `toml:"external_url" json:"external_url"`
 		AdditionalRedirectUrls     []string             `toml:"additional_redirect_urls" json:"additional_redirect_urls"`
 		JwtExpiry                  uint                 `toml:"jwt_expiry" json:"jwt_expiry"`
 		JwtIssuer                  string               `toml:"jwt_issuer" json:"jwt_issuer"`
@@ -162,6 +163,8 @@ type (
 		PasswordRequirements       PasswordRequirements `toml:"password_requirements" json:"password_requirements"`
 		SigningKeysPath            string               `toml:"signing_keys_path" json:"signing_keys_path"`
 		SigningKeys                []JWK                `toml:"-" json:"-"`
+		Passkey                    *passkey             `toml:"passkey" json:"passkey"`
+		Webauthn                   *webauthn            `toml:"webauthn" json:"webauthn"`
 
 		RateLimit   rateLimit   `toml:"rate_limit" json:"rate_limit"`
 		Captcha     *captcha    `toml:"captcha" json:"captcha"`
@@ -378,12 +381,29 @@ type (
 		Ethereum ethereum `toml:"ethereum" json:"ethereum"`
 	}
 
+	passkey struct {
+		Enabled bool `toml:"enabled" json:"enabled"`
+	}
+
+	webauthn struct {
+		RpDisplayName string   `toml:"rp_display_name" json:"rp_display_name"`
+		RpId          string   `toml:"rp_id" json:"rp_id"`
+		RpOrigins     []string `toml:"rp_origins" json:"rp_origins"`
+	}
+
 	OAuthServer struct {
 		Enabled                  bool   `toml:"enabled" json:"enabled"`
 		AllowDynamicRegistration bool   `toml:"allow_dynamic_registration" json:"allow_dynamic_registration"`
 		AuthorizationUrlPath     string `toml:"authorization_url_path" json:"authorization_url_path"`
 	}
 )
+
+func (a auth) GetExternalURL(apiExternalURL string) string {
+	if len(a.ExternalUrl) > 0 {
+		return a.ExternalUrl
+	}
+	return strings.TrimRight(apiExternalURL, "/") + "/auth/v1"
+}
 
 func (a *auth) ToUpdateAuthConfigBody() v1API.UpdateAuthConfigBody {
 	body := v1API.UpdateAuthConfigBody{
@@ -406,6 +426,12 @@ func (a *auth) ToUpdateAuthConfigBody() v1API.UpdateAuthConfigBody {
 	// When local config is not set, we assume platform defaults should not change
 	if a.Captcha != nil {
 		a.Captcha.toAuthConfigBody(&body)
+	}
+	if a.Passkey != nil {
+		a.Passkey.toAuthConfigBody(&body)
+	}
+	if a.Webauthn != nil {
+		a.Webauthn.toAuthConfigBody(&body)
 	}
 	a.Hook.toAuthConfigBody(&body)
 	a.MFA.toAuthConfigBody(&body)
@@ -430,6 +456,8 @@ func (a *auth) FromRemoteAuthConfig(remoteConfig v1API.AuthConfigResponse) {
 	a.MinimumPasswordLength = cast.IntToUint(ValOrDefault(remoteConfig.PasswordMinLength, 0))
 	prc := ValOrDefault(remoteConfig.PasswordRequiredCharacters, "")
 	a.PasswordRequirements = NewPasswordRequirement(v1API.UpdateAuthConfigBodyPasswordRequiredCharacters(prc))
+	a.Passkey.fromAuthConfig(remoteConfig)
+	a.Webauthn.fromAuthConfig(remoteConfig)
 	a.RateLimit.fromAuthConfig(remoteConfig)
 	if s := a.Email.Smtp; s != nil && s.Enabled {
 		a.RateLimit.EmailSent = cast.IntToUint(ValOrDefault(remoteConfig.RateLimitEmailSent, 0))
@@ -487,6 +515,34 @@ func (c *captcha) fromAuthConfig(remoteConfig v1API.AuthConfigResponse) {
 		}
 	}
 	c.Enabled = ValOrDefault(remoteConfig.SecurityCaptchaEnabled, false)
+}
+
+func (p passkey) toAuthConfigBody(body *v1API.UpdateAuthConfigBody) {
+	body.PasskeyEnabled = cast.Ptr(p.Enabled)
+}
+
+func (p *passkey) fromAuthConfig(remoteConfig v1API.AuthConfigResponse) {
+	// When local config is not set, we assume platform defaults should not change
+	if p == nil {
+		return
+	}
+	p.Enabled = remoteConfig.PasskeyEnabled
+}
+
+func (w webauthn) toAuthConfigBody(body *v1API.UpdateAuthConfigBody) {
+	body.WebauthnRpDisplayName = nullable.NewNullableWithValue(w.RpDisplayName)
+	body.WebauthnRpId = nullable.NewNullableWithValue(w.RpId)
+	body.WebauthnRpOrigins = nullable.NewNullableWithValue(strings.Join(w.RpOrigins, ","))
+}
+
+func (w *webauthn) fromAuthConfig(remoteConfig v1API.AuthConfigResponse) {
+	// When local config is not set, we assume platform defaults should not change
+	if w == nil {
+		return
+	}
+	w.RpDisplayName = ValOrDefault(remoteConfig.WebauthnRpDisplayName, "")
+	w.RpId = ValOrDefault(remoteConfig.WebauthnRpId, "")
+	w.RpOrigins = strToArr(ValOrDefault(remoteConfig.WebauthnRpOrigins, ""))
 }
 
 func (h hook) toAuthConfigBody(body *v1API.UpdateAuthConfigBody) {
@@ -629,8 +685,8 @@ func (m *mfa) fromAuthConfig(remoteConfig v1API.AuthConfigResponse) {
 }
 
 func (s sessions) toAuthConfigBody(body *v1API.UpdateAuthConfigBody) {
-	body.SessionsTimebox = nullable.NewNullableWithValue(int(s.Timebox.Hours()))
-	body.SessionsInactivityTimeout = nullable.NewNullableWithValue(int(s.InactivityTimeout.Hours()))
+	body.SessionsTimebox = nullable.NewNullableWithValue(float32(s.Timebox.Hours()))
+	body.SessionsInactivityTimeout = nullable.NewNullableWithValue(float32(s.InactivityTimeout.Hours()))
 }
 
 func (s *sessions) fromAuthConfig(remoteConfig v1API.AuthConfigResponse) {
