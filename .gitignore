@@ -27,5 +27,8 @@
 node_modules
 package-lock.json
 
+# Throwaway dev home for the consolidation migration script (see CLI-1410)
+/tools/_dev/
+
 # Initialized by cli for local testing
 /supabase
